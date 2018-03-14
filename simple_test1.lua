@@ -1,18 +1,20 @@
 require 'torch'
 require 'optim'
 require 'nn'
-require 'cunn'
-require 'cudnn'
-
+dofile('./lib_stream.lua')
 torch.setdefaulttensortype('torch.FloatTensor')
 opt = {
-  batchSize = 1000,
+  batchSize = 60,
+  valBatchSize = 60,
+  batches_per_env = 1000,
   epochs = 1000,
-  lr = 0.01,
+  lrC = 0.001,
+  lrW = 0.01,
   nb_classes = 4,
   load_pretrained_classifier = true,
   load_pretrained_weighter = true,
-  train = 'full'
+  train = 'full',
+  cuda = false,
 }
 opt.manualSeed = torch.random(1, 10000) -- fix seed
 torch.manualSeed(opt.manualSeed)
@@ -26,15 +28,13 @@ testset = torch.load(data_path .. 'test.t7')
 --------------------------------------------------------------------------------------------------------------------------------
 if opt.load_pretrained_classifier then
   netC = torch.load('./pretrained_models/C_full_quaters2D.t7')
-  p, gp = netC:getParameters()
+  pC, gpC = netC:getParameters()
 else
   netC = nn.Sequential()
   netC:add(nn.Linear(2,10)):add(nn.ReLU(true)):add(nn.Linear(10,10)):add(nn.ReLU(true)):add(nn.Linear(10,4)):add(nn.LogSoftMax())
-  netC = netC:cuda()
-  p, gp = netC:getParameters()
-  p = p:normal()
+  pC, gpC = netC:getParameters()
+  pC = pC:normal()
 end
-crit = nn.ClassNLLCriterion();
 
 --------------------------------------------------------------------------------------------------------------------------------
 -- DEFINING THE WEIGHT GENERATOR
@@ -45,118 +45,69 @@ if opt.load_pretrained_weighter then
 else
   netW = nn.Sequential()
   netW:add(nn.Linear(opt.nb_classes,20)):add(nn.ReLU(true)):add(nn.Linear(20,20)):add(nn.ReLU(true)):add(nn.Linear(20,p:size(1))):add(nn.Sigmoid())
-  netW = netW:cuda()
   pW, gpW = netW:getParameters()
 end
-bs = opt.batchSize
-
-function generateEnv(nb_classes, bs)
-  local data = torch.rand(bs, nb_classes)
-  return data:ge(0.5):float():cuda()
-end
-  
-function getBatch(data, indices_)
-  local batch = {}
-  batch.data = data.data:index(1, indices_:long())
-  batch.labels = data.labels:index(1, indices_:long())
-  return batch
-end
-
-function test_classifier(C, data, opt)
-  local confusion = optim.ConfusionMatrix(opt.nb_classes)
-  confusion:zero()
-  for idx = 1, data.data:size(1), opt.batchSize do
-    --xlua.progress(idx, opt.testSize)
-    indices_ = torch.range(idx, math.min(idx + opt.batchSize, data.data:size(1)))
-    local batch = getBatch(data, indices_:long())
-    local y = C:forward(batch.data:cuda())
-    y = y:float()
-    _, y_max = y:max(2)
-    confusion:batchAdd(y_max:squeeze():float(), batch.labels:float())
-  end
-  confusion:updateValids()
-  return confusion  
-end
-
-function train_classifier(C, data, opt)
-  local fx = function(x)
-    if x ~= p then p:copy(x) end
-    gp:zero()
-    local output = C:forward(input)
-    y = output:float()
-    _, y_max = y:max(2)
-    local errM = criterion:forward(output, label)
-    local df_do = criterion:backward(output, label)
-    C:backward(input, df_do)
-    confusion_train:batchAdd(y_max:squeeze():float(), label:float())
-    return errM, gp
-  end
-  input = torch.CudaTensor(opt.batchSize, 2)
-  label = torch.CudaTensor(opt.batchSize)
-  criterion = crit:cuda()
-  local indices_rand = torch.randperm(data.data:size(1))
-  confusion_train = optim.ConfusionMatrix(opt.nb_classes)
-  confusion_train:zero()
-  idx_test = 0
-  confusion_test_ = {}
-  for i = 1, math.floor(data.data:size(1)/opt.batchSize) do 
-    --xlua.progress(i, math.floor(data.data:size(1)/opt.batchSize))
-    indices_ = indices_rand[{{1+(i-1)*opt.batchSize, i*opt.batchSize}}]
-    batch = getBatch(data, indices_:long())
-    input:copy(batch.data)
-    label:copy(batch.labels)
---    optim.sgd(fx, p, config)
-    f_, dfdx = fx(p)
-    p:add(-opt.lr, dfdx)
-    --C_model:clearState()
-    p, gp = C:getParameters()
-  end
-  --print('Training set confusion matrix: ')
-  --print(confusion_train)
-  return C, confusion_train
-end
-
+critC = nn.ClassNLLCriterion(); 
 critW = nn.MSECriterion()
-function train_W(W, opt)
-  local fx = function(x)
-    if x ~= pW then pW:copy(x) end
+--------------------------------------------------------------------------------------------------------------------------------
+-- SETTING TO CUDA IF NEEDED
+--------------------------------------------------------------------------------------------------------------------------------
+if opt.cuda then
+  require 'cunn'
+  require 'cudnn'
+  critC = critC:cuda(); critW = critW:cuda()
+  netC = netC:cuda(); netW = netW:cuda()
+else
+  critC = critC:float(); critW = critW:float()
+  netC = netC:float(); netW = netW:float()
+end  
+
+stream = true
+env_count = 0
+while env_count < 100 do
+  current_env = getEnv(opt)
+  env_count = env_count + 1
+  print('Current environment: '); print(current_env:reshape(1,4))
+  W = netW:forward(current_env) --Producing current weights for given environment
+  W:clamp(0,1)
+  print('Sum of parameters of W(e): ' .. W:sum())
+  for idx_batch = 1, opt.batches_per_env do
+    batch = generate_2D_quaters({opt.batchSize, 2}, current_env, opt)
+    pW, gpW = netW:getParameters()
+    pC, gpC = netC:getParameters()
+    gpC:zero()
+    W = netW:forward(current_env)                   -- (1)
+    output = netC:forward(batch.data)               -- (2)
+    df_dtheta = critC:backward(output, batch.labels)
+    netC:backward(batch.data, df_dtheta)            -- (3)
+    netC_temp = netC:clone(); pC_temp, gpC_temp = netC_temp:getParameters()
+    pC_temp:add(-opt.lrC, torch.cmul(W, gpC));      -- (4)
+    val_indices = torch.randperm(valset.data:size(1))[{{1, opt.valBatchSize}}]
+    batch_val = getBatch(valset, val_indices)       -- (5)
+    output_val = netC_temp:forward(batch_val.data)  -- (6)
+    df_dtheta = critC:backward(output_val, batch_val.labels)
+    netC_temp:backward(batch_val.data, df_dtheta); -- gpC:clamp(-5,5)
+    --print('Norm of dL/dtheta: '); print(gpC_back:norm())
+    --print('Norm of dL/dtheta_new: '); print(gpC:norm())
+    --dW = -opt.lrC*torch.cmul(gpC_back, gpC)
+    dW = -opt.lrC*torch.cmul(gpC_temp, gpC)                 -- (7.2)
+    --print('Norm of dW: '); print(dW:norm())
+    --print(dW)
     gpW:zero()
-    out_star = W:forward(input)
-    local errM = criterion:forward(out_star, out_)
-    local df_do = criterion:backward(out_star, out_)
-    W:backward(input, df_do)
-    return errM, gpW
+    dW_dgamma = critW:backward(W, W-dW)
+    netW:backward(current_env, dW_dgamma)
+   -- print('Norm of the gradient of netW: ' .. gpW:norm())
+    gpC:clamp(-5,5)
+   -- print('Norm of the gradient of netW after clamping: ' .. gpW:norm())
+    --print('Norm of gpW: '); print(gpW:norm())
+    pW:add(-opt.lrW, gpW)
+    W = netW:forward(current_env)
+    pC:add(-opt.lrC, torch.cmul(W, gpC))
   end
-  input = torch.CudaTensor(opt.batchSize, opt.nb_classes)
-  out_ = torch.ones(opt.batchSize, p:size(1)):cuda()
-  criterion = critW:cuda()
-  for i = 1, 1e+5 do 
-    --xlua.progress(i, math.floor(data.data:size(1)/opt.batchSize))
-    batch = generateEnv(opt.nb_classes, opt.batchSize)
-    input:copy(batch)
---    optim.sgd(fx, p, configW)
-    f_, dfdx = fx(pW)
-    pW:add(-opt.lr, dfdx)
-    pW, gpW = W:getParameters()
-    print('Parameters sum: ' .. out_star:sum()/1000)
-  end
-  return W
+  print('Weights for environment '); print(current_env:reshape(1,4))
+  print(W)
+  confusion = test_classifier(netC, testset, opt); print(confusion)
 end
-configW = {}
-configW.learningRate = opt.lr
-netW = train_W(netW, opt)
--- config = {}
--- config.learningRate = opt.lr
--- conf = test_classifier(netC, testset,opt); print(conf)
--- 
--- for epoch = 1, opt.epochs do
---   print('Epoch number: ' .. epoch .. ', Learning rate: ' .. opt.lr)
--- --  if epoch%100==0 then opt.lr = opt.lr/1.5 end
---   train_classifier(netC, trainset, opt)
---   conf = test_classifier(netC, testset,opt); print(conf)
--- end   
---     
-    
     
     
     
