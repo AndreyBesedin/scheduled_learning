@@ -35,6 +35,7 @@ function getBatch(data, indices_)
   local batch = {}
   batch.data = data.data:index(1, indices_:long())
   batch.labels = data.labels:index(1, indices_:long())
+  if opt.cuda then batch.data = batch.data:cuda(); batch.labels = batch.labels:cuda() end
   return batch
 end
 

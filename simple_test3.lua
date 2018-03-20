@@ -1,3 +1,7 @@
+--[[
+    Test with supplementary weight for back-propagation, updated on validation set.
+   Those weights are updated directly during training of the classifier, based on it's error on validation set.
+    ]]
 require 'torch'
 require 'optim'
 require 'nn'
@@ -9,7 +13,7 @@ opt = {
   batches_per_env = 1000,
   epochs = 1000,
   lrC = 0.0005,
-  lrW = 10,
+  lrW = 0.01,
   nb_classes = 4,
   load_pretrained_classifier = true,
   load_pretrained_weighter = true,
@@ -17,7 +21,8 @@ opt = {
   cuda = true,
   dataset = 'quaters', -- MNIST 
   optimizeW = true,
-  nb_env = 200
+  reinitW = false,
+  nb_env = 200,
 }
 opt.manualSeed = torch.random(1, 10000) -- fix seed
 torch.manualSeed(opt.manualSeed)
@@ -67,18 +72,16 @@ end
 
 stream = true
 env_count = 0
-res_conf = torch.FloatTensor(opt.nb_env)
+W = torch.ones(pC:size(1)); 
+res_conf = torch.FloatTensor(opt.nb_env) 
 while env_count < opt.nb_env do
   current_env = getEnv(opt)
   env_count = env_count + 1
   print('Current environment: '); print(current_env:reshape(1,4))
-  if opt.optimizeW == true then
-    W = netW:forward(current_env) --Producing current weights for given environment
-  else
+  if opt.reinitW then
     W = torch.ones(pC:size(1)); 
-    if opt.cuda == true then W =  W:cuda() end
   end
-  --print('Sum of parameters of W(e): ' .. W:sum())
+  if opt.cuda == true then W =  W:cuda() end
   for idx_batch = 1, opt.batches_per_env do
     batch = generate_2D_quaters({opt.batchSize, 2}, current_env, opt)
     pW, gpW = netW:getParameters()
@@ -95,15 +98,13 @@ while env_count < opt.nb_env do
       batch_val = getBatch(valset, val_indices, opt)       -- (5)
       output_val = netC_temp:forward(batch_val.data)  -- (6)
       df_dtheta = critC:backward(output_val, batch_val.labels)
-      netC_temp:backward(batch_val.data, df_dtheta); -- gpC:clamp(-5,5)
-      dW = -opt.lrC*torch.cmul(gpC_temp, gpC)                 -- (7.2)
-      gpW:zero()
-      dW_dgamma = critW:backward(W, W-dW)
-      netW:backward(current_env, dW_dgamma)
-      pW:add(-opt.lrW, gpW)
-      W = netW:forward(current_env)
+      netC_temp:backward(batch_val.data, df_dtheta); gpC_temp:clamp(-10,10)
+      W:add(-opt.lrW*opt.lrC*torch.cmul(gpC_temp, gpC))
+      --dW = -opt.lrC*torch.cmul(gpC_temp, gpC)                 -- (7.2)
     end
+    W:clamp(0,1)
     pC:add(-opt.lrC, torch.cmul(W, gpC))
+  --  print("Sum of parameters of W: " .. W:sum())
   end
   print("Sum of parameters of W: " .. W:sum())
   confusion = test_classifier(netC, testset, opt); print(confusion)
