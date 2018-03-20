@@ -3,11 +3,11 @@ require 'gnuplot'
 require 'nn'
 
 torch.setdefaulttensortype('torch.FloatTensor')
-
+--[[
 netC = nn.Sequential()
 netC:add(nn.Linear(2, 5)):add(nn.ReLU(true)):add(nn.Linear(5,4)):add(nn.LogSoftMax())
 p, gp = netC:parameters();
-gp:zero()
+gp:zero()]]
 
 function plot_net_activation(params)
   to_plot = {}
