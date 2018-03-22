@@ -55,3 +55,4 @@ function test_classifier(C, data, opt)
   confusion:updateValids()
   return confusion  
 end
+

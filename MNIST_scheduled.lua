@@ -11,7 +11,7 @@ opt = {
   lrC = 0.0005,
   lrW = 10,
   nb_classes = 10,
-  load_pretrained_classifier = true,
+  load_pretrained_classifier = false,
   load_pretrained_weighter = true,
   train = 'full',
   cuda = true,
@@ -34,12 +34,12 @@ if opt.load_pretrained_classifier then
   pC, gpC = netC:getParameters()
 else
   netC = nn.Sequential()
-  netC:add(nn.SpatialConvolution(1,16, 4, 4, 2, 2, 1, 1)):add(nn.ReLU(true))
-  netC:add(nn.SpatialConvolution(16, 32, 4, 4, 2, 2, 1, 1)):add(nn.ReLU(true))
-  netC:add(nn.SpatialMaxPooling(32, 2, 2, 2,2)):add(nn.View(512))
-  netC:add(nn.Linear(512,512)):add(nn.dropout(0.5)):add(nn.ReLU(true))
-  netC:add(nn.Linear(512,128)):add(nn.ReLU(true))
-  netC:add(nn.Linear(128,10)):add(nn.ReLU(true)):add(nn.LogSoftMax())
+  netC:add(nn.SpatialConvolution(1,8, 4, 4, 2, 2, 1, 1)):add(nn.ReLU(true))
+  netC:add(nn.SpatialMaxPooling(2, 2, 2,2))  
+  netC:add(nn.SpatialConvolution(8, 16, 3, 3, 2, 2, 1, 1)):add(nn.ReLU(true))
+  netC:add(nn.SpatialMaxPooling(2, 2, 2,2)):add(nn.View(64))
+  netC:add(nn.Linear(64,10)):add(nn.ReLU(true))
+  netC:add(nn.Linear(10,10)):add(nn.LogSoftMax())
   pC, gpC = netC:getParameters()
   pC = pC:normal()
 end
